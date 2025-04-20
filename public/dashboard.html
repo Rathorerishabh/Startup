@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPG Monitor Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --success-color: #2ecc71;
+            --warning-color: #f39c12;
+            --danger-color: #e74c3c;
+            --light-color: #ecf0f1;
+            --dark-color: #2c3e50;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7fa;
+            min-height: 100vh;
+        }
+        
+        header {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 1rem 0;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        
+        .nav-links {
+            display: flex;
+            list-style: none;
+        }
+        
+        .nav-links li {
+            margin-left: 1.5rem;
+        }
+        
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            transition: all 0.3s ease;
+        }
+        
+        .nav-links a:hover {
+            color: #ecf0f1;
+        }
+        
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            padding: 20px;
+        }
+        
+        .card {
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .card-title {
+            font-size: 1.25rem;
+            color: var(--secondary-color);
+            font-weight: 600;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .stat-card {
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--primary-color);
+            margin: 10px 0;
+        }
+        
+        .stat-label {
+            color: #777;
+            font-size: 0.9rem;
+        }
+        
+        .files-section {
+            margin-top: 30px;
+        }
+        
+        .file-list {
+            list-style: none;
+            margin-top: 20px;
+        }
+        
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background-color: white;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+            transition: all 0.3s ease;
+        }
+        
+        .file-item:hover {
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+        
+        .file-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .file-actions a {
+            display: inline-block;
+            padding: 5px 10px;
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 5px;
+            text-decoration: none;
+            transition: all 0.3s ease;
+        }
+        
+        .file-actions a:hover {
+            background-color: #2980b9;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        
+        .status-live {
+            background-color: var(--success-color);
+            box-shadow: 0 0 5px var(--success-color);
+            animation: pulse 2s infinite;
+        }
+        
+        .status-idle {
+            background-color: var(--warning-color);
+        }
+        
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+            100% {
+                opacity: 1;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Heart beat animation */
+        .heart-rate {
+            height: 100px;
+            position: relative;
+            margin: 20px auto;
+            overflow: hidden;
+            width: 100%;
+        }
+        
+        .fade-in {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: linear-gradient(to right, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0) 20%, rgba(255, 255, 255, 0) 80%, rgba(255, 255, 255, 1) 100%);
+            z-index: 2;
+        }
+        
+        .heartbeat-wave {
+            height: 100px;
+            width: 100%;
+            position: absolute;
+            bottom: 0;
+            background-position: 0 0;
+            animation: heartbeat 15s linear infinite;
+        }
+        
+        @keyframes heartbeat {
+            0% {
+                background-position: 0 0;
+            }
+            100% {
+                background-position: 1920px 0;
+            }
+        }
+
+        /* Heart rate zone indicator */
+        .zone-indicator {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 20px;
+            color: white;
+            font-weight: 500;
+            margin-top: 10px;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .quality-bar {
+            height: 5px;
+            background-color: #eee;
+            width: 100%;
+            border-radius: 5px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .quality-fill {
+            height: 100%;
+            background-color: var(--primary-color);
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+
+        /* Heart rate animation */
+        .heart-icon {
+            display: inline-block;
+            color: #e74c3c;
+            margin-right: 5px;
+            animation: heartbeat-icon 1s infinite;
+        }
+
+        @keyframes heartbeat-icon {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+        }
+
+        /* Trend indicators */
+        .trend-up {
+            color: #e74c3c;
+        }
+
+        .trend-down {
+            color: #3498db;
+        }
+
+        .trend-stable {
+            color: #2ecc71;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <nav>
+                <div class="logo">PPG Monitor</div>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="/dashboard">Dashboard</a></li>
+                    <li><a href="#files-section">Data Files</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="dashboard-grid">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <span class="status-indicator status-live" id="status-indicator"></span>
+                        PPG Signal Monitoring
+                    </h2>
+                    <div>
+                        <span id="connection-status">Connecting...</span>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="ppgChart"></canvas>
+                </div>
+                
+                <div class="heart-rate">
+                    <div class="fade-in"></div>
+                    <div class="heartbeat-wave" id="heartbeat-wave"></div>
+                </div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Heart Rate</div>
+                    <div class="stat-value" id="heart-rate">
+                        <i class="fas fa-heartbeat heart-icon"></i>--
+                    </div>
+                    <div id="heart-rate-zone">Not detected</div>
+                    <div class="quality-bar">
+                        <div class="quality-fill" id="quality-indicator"></div>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-label">Signal Strength</div>
+                    <div class="stat-value" id="signal-strength">--</div>
+                    <div>Current signal quality</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-label">Recording Time</div>
+                    <div class="stat-value" id="recording-time">00:00</div>
+                    <div>Time elapsed</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-label">Data Points</div>
+                    <div class="stat-value" id="data-points">0</div>
+                    <div>Total points recorded</div>
+                </div>
+            </div>
+            
+            <div class="card files-section" id="files-section">
+                <div class="card-header">
+                    <h2 class="card-title">Recorded Data Files</h2>
+                </div>
+                <ul class="file-list" id="file-list">
+                    <li class="file-item">
+                        <div class="file-name">Loading data files...</div>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Chart.js setup
+        const ctx = document.getElementById('ppgChart').getContext('2d');
+        const ppgChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(500).fill(''),
+                datasets: [{
+                    label: 'PPG Signal',
+                    data: Array(500).fill(0),
+                    backgroundColor: 'rgba(52, 152, 219, 0.2)',
+                    borderColor: 'rgba(52, 152, 219, 1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        grid: {
+                            drawBorder: false
+                        }
+                    },
+                    x: {
+                        display: false
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                },
+                animation: {
+                    duration: 0
+                }
+            }
+        });
+        
+        // WebSocket connection
+        let ws;
+        let dataPoints = 0;
+        let startTime = Date.now();
+        let lastDataTime = 0;
+        let isConnected = false;
+        let maxValue = 0;
+        
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function() {
+                isConnected = true;
+                document.getElementById('connection-status').textContent = 'Connected';
+                document.getElementById('status-indicator').classList.remove('status-idle');
+                document.getElementById('status-indicator').classList.add('status-live');
+                console.log('WebSocket connected');
+            };
+            
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                
+                if (message.type === 'initial' || message.type === 'update') {
+                    updateChart(message.data);
+                    updateHeartbeatWave(message.data);
+                    
+                    // Update heart rate display
+                    if (message.heartRate && message.heartRate > 0) {
+                        document.getElementById('heart-rate').innerHTML = 
+                            `<i class="fas fa-heartbeat heart-icon"></i>${message.heartRate}`;
+                        
+                        // Update heart rate zone
+                        document.getElementById('heart-rate-zone').textContent = message.heartRateZone;
+                        document.getElementById('heart-rate-zone').style.color = getZoneColor(message.heartRateZone);
+                        
+                        // Update quality indicator
+                        const qualityPercentage = Math.round(message.heartRateQuality * 100);
+                        document.getElementById('quality-indicator').style.width = `${qualityPercentage}%`;
+                        
+                        // Set quality color based on value
+                        if (qualityPercentage > 75) {
+                            document.getElementById('quality-indicator').style.backgroundColor = '#2ecc71';
+                        } else if (qualityPercentage > 50) {
+                            document.getElementById('quality-indicator').style.backgroundColor = '#f39c12';
+                        } else {
+                            document.getElementById('quality-indicator').style.backgroundColor = '#e74c3c';
+                        }
+                        
+                        // Update title with heart rate
+                        document.title = `HR: ${message.heartRate} - PPG Monitor`;
+                    } else {
+                        document.getElementById('heart-rate').innerHTML = 
+                            `<i class="fas fa-heartbeat heart-icon"></i>--`;
+                        document.getElementById('heart-rate-zone').textContent = 'Not detected';
+                        document.getElementById('heart-rate-zone').style.color = '#777';
+                        document.getElementById('quality-indicator').style.width = '0%';
+                    }
+                    
+                    lastDataTime = Date.now();
+                }
+            };
+            
+            ws.onclose = function() {
+                isConnected = false;
+                document.getElementById('connection-status').textContent = 'Disconnected';
+                document.getElementById('status-indicator').classList.remove('status-live');
+                document.getElementById('status-indicator').classList.add('status-idle');
+                console.log('WebSocket disconnected. Reconnecting in 3 seconds...');
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                ws.close();
+            };
+        }
+        
+        function updateChart(newData) {
+            if (!newData || newData.length === 0) return;
+            
+            // Update data points count
+            dataPoints += newData.length;
+            document.getElementById('data-points').textContent = dataPoints.toLocaleString();
+            
+            // Update chart data - use exactly 500 points
+            ppgChart.data.datasets[0].data = newData.slice(0, 500);
+            
+            // Update chart
+            ppgChart.update();
+            
+            // Update signal strength
+            updateSignalStrength(newData);
+        }
+        
+        function updateSignalStrength(data) {
+            if (!data || data.length === 0) return;
+            
+            // Find the maximum value in the data
+            const max = Math.max(...data);
+            // Find the minimum value in the data
+            const min = Math.min(...data);
+            // Range
+            const range = max - min;
+            
+            // Find the average of the latest 50 values for current reading
+            const latestValues = data.slice(-50);
+            const average = latestValues.reduce((sum, val) => sum + val, 0) / latestValues.length;
+            
+            // Calculate signal strength based on current average relative to the full range
+            const signalValue = ((average - min) / range) * 100;
+            const signalStrength = Math.round(Math.max(0, Math.min(100, signalValue)));
+            
+            // Update the signal strength display
+            document.getElementById('signal-strength').textContent = signalStrength + '%';
+        }
+        
+        function updateHeartbeatWave(data) {
+            if (!data || data.length === 0) return;
+            
+            // Create a heartbeat visualization as a SVG path
+            const width = 1920; // Width of the heartbeat wave
+            const height = 100; // Height of the heartbeat container
+            const points = data.length;
+            const pointDistance = width / points;
+            
+            // Normalize data between 0 and 1
+            const max = Math.max(...data);
+            const min = Math.min(...data);
+            const range = max - min || 1; // Avoid division by zero
+            
+            // Create SVG path
+            let path = `M0,${height/2}`;
+            for (let i = 0; i < data.length; i++) {
+                const x = i * pointDistance;
+                const normalizedValue = (data[i] - min) / range;
+                const y = height - (normalizedValue * (height * 0.8) + (height * 0.1));
+                path += ` L${x},${y}`;
+            }
+            
+            // Set the path as a background image
+            const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+                <path d="${path}" stroke="#3498db" stroke-width="2" fill="none" />
+            </svg>`;
+            
+            const svgEncoded = 'data:image/svg+xml;base64,' + btoa(svgContent);
+            
+            document.getElementById('heartbeat-wave').style.backgroundImage = `url('${svgEncoded}')`;
+        }
+        
+        function updateRecordingTime() {
+            const now = Date.now();
+            const elapsed = now - startTime;
+            
+            const minutes = Math.floor(elapsed / 60000);
+            const seconds = Math.floor((elapsed % 60000) / 1000);
+            
+            const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            document.getElementById('recording-time').textContent = timeStr;
+            
+            // Check if we've received data recently (within last 5 seconds)
+            if (now - lastDataTime > 5000 && isConnected) {
+                document.getElementById('status-indicator').classList.remove('status-live');
+                document.getElementById('status-indicator').classList.add('status-idle');
+                document.getElementById('connection-status').textContent = 'No data';
+            } else if (isConnected) {
+                document.getElementById('status-indicator').classList.remove('status-idle');
+                document.getElementById('status-indicator').classList.add('status-live');
+                document.getElementById('connection-status').textContent = 'Connected';
+            }
+        }
+        
+        function loadDataFiles() {
+            fetch('/api/data-files')
+                .then(response => response.json())
+                .then(files => {
+                    const fileList = document.getElementById('file-list');
+                    
+                    if (files.length === 0) {
+                        fileList.innerHTML = '<li class="file-item"><div class="file-name">No data files available</div></li>';
+                        return;
+                    }
+                    
+                    let html = '';
+                    files.forEach(file => {
+                        html += `
+                            <li class="file-item">
+                                <div class="file-name">${file}</div>
+                                <div class="file-actions">
+                                    <a href="/api/data-files/${file}" download><i class="fas fa-download"></i> Download</a>
+                                </div>
+                            </li>
+                        `;
+                    });
+                    
+                    fileList.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading data files:', error);
+                    document.getElementById('file-list').innerHTML = 
+                        '<li class="file-item"><div class="file-name">Error loading data files</div></li>';
+                });
+        }
+        
+        // Helper function to get zone colors
+        function getZoneColor(zone) {
+            const zoneColors = {
+                "Rest": "#3498db",
+                "Light": "#2ecc71",
+                "Moderate": "#f1c40f",
+                "Vigorous": "#e67e22",
+                "High": "#e74c3c",
+                "Maximum": "#9b59b6"
+            };
+            return zoneColors[zone] || "#777";
+        }
+        
+        // Initialize
+        connectWebSocket();
+        loadDataFiles();
+        
+        // Update recording time every second
+        setInterval(updateRecordingTime, 1000);
+        
+        // Refresh data files list every 30 seconds
+        setInterval(loadDataFiles, 30000);
+    </script>
+</body>
+</html>
