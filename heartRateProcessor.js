@@ -1,348 +1,382 @@
-// Advanced Heart Rate Processing Module with stability enhancements
+// Final Heart Rate Calculator
+// Processes each batch of 500 samples with extended acquisition period
 
-// Constants for heart rate detection
-const HR_CONSTANTS = {
-    SAMPLE_RATE: 150,              // Expected sample rate in Hz
-    MIN_HR: 40,                    // Minimum physiological heart rate
-    MAX_HR: 200,                   // Maximum physiological heart rate
-    BUFFER_SIZE: 1000,             // Size of buffer for calculations
-    MIN_PEAKS: 3,                  // Minimum peaks needed for calculation
-    SIGNAL_THRESHOLD: 2000,        // Threshold for finger detection
-    QUALITY_LEVELS: 5,             // Number of quality levels
-    MAX_JUMP: 15                   // Maximum allowed BPM change between readings
-  };
+// Keep track of the last 4 shown heart rates for stability checking
+const recentHeartRates = [];
+const MAX_HISTORY = 4; // Keep last 4 heart rate readings for stability
+
+// Track number of batches received for extended acquisition
+let batchesReceived = 0;
+const MIN_BATCHES_FOR_DISPLAY = 5; // Require at least 5 batches before showing heart rate
+
+// Heart rate zones
+const HR_ZONES = [
+  { name: "Rest", color: "#3498db", upperLimit: 90, colorCode: "#3498db" },
+  { name: "Light", color: "#2ecc71", upperLimit: 110, colorCode: "#2ecc71" },
+  { name: "Moderate", color: "#f1c40f", upperLimit: 130, colorCode: "#f1c40f" },
+  { name: "Vigorous", color: "#e67e22", upperLimit: 150, colorCode: "#e67e22" },
+  { name: "High", color: "#e74c3c", upperLimit: 170, colorCode: "#e74c3c" },
+  { name: "Maximum", color: "#9b59b6", upperLimit: 240, colorCode: "#9b59b6" }
+];
+
+// Track acquisition state
+let isAcquiring = false;
+let acquisitionStartTime = 0;
+let isStable = false;
+
+// Main heart rate processing function - processes only the current 500 samples
+function processHeartRate(ppgData) {
+  const currentTime = Date.now();
   
-  // Heart rate state tracking
-  let hrState = {
-    fingerDetected: false,
-    ppgBuffer: [],
-    heartRateHistory: [],
-    confidenceScores: [],
-    timestamps: [],
-    lastHeartRate: 0,
-    lastCalculation: 0,
-    signalQuality: 0,
-    stabilityCounter: 0,
-    smoothedHeartRate: 0           // Smoothed heart rate for display
-  };
+  // Check if we have enough data
+  if (!ppgData || ppgData.length < 100) {
+    isAcquiring = false;
+    batchesReceived = 0;
+    return createResponse(0, false, "No signal", "Place finger on sensor");
+  }
+
+  // Calculate basic signal metrics
+  const min = Math.min(...ppgData);
+  const max = Math.max(...ppgData);
   
-  // Process heart rate with enhanced stability
-  function processHeartRate(ppgData) {
-    // Add incoming data to buffer
-    hrState.ppgBuffer = hrState.ppgBuffer.concat(ppgData);
-    
-    // Keep buffer at maximum size
-    if (hrState.ppgBuffer.length > HR_CONSTANTS.BUFFER_SIZE) {
-      hrState.ppgBuffer = hrState.ppgBuffer.slice(-HR_CONSTANTS.BUFFER_SIZE);
-    }
-    
-    // Need enough data for meaningful analysis
-    if (hrState.ppgBuffer.length < HR_CONSTANTS.SAMPLE_RATE * 2) {
-      return { 
-        heartRate: 0, 
-        zone: "Rest", 
-        quality: 0, 
-        trend: "stable",
-        fingerDetected: false 
-      };
-    }
-    
-    // Check for finger presence using signal quality
-    const signalQuality = assessSignalQuality(hrState.ppgBuffer);
-    hrState.fingerDetected = signalQuality > 0.3;
-    
-    if (!hrState.fingerDetected) {
-      // Reset state if no finger detected
-      hrState.stabilityCounter = 0;
-      hrState.smoothedHeartRate = 0;
-      return { 
-        heartRate: 0, 
-        zone: "Rest", 
-        quality: 0, 
-        trend: "stable",
-        fingerDetected: false 
-      };
-    }
-    
-    // Only recalculate heart rate every 500ms to avoid unnecessary processing
-    const now = Date.now();
-    if (now - hrState.lastCalculation < 500 && hrState.smoothedHeartRate > 0) {
-      // Return last calculation
-      return {
-        heartRate: hrState.smoothedHeartRate,
-        zone: getCurrentZone(hrState.smoothedHeartRate),
-        quality: hrState.signalQuality,
-        trend: calculateTrend(hrState.heartRateHistory),
-        fingerDetected: true
-      };
-    }
-    
-    // Main heart rate calculation process
-    const result = calculateHeartRate(hrState.ppgBuffer);
-    hrState.lastCalculation = now;
-    
-    if (result.heartRate > 0) {
-      // Apply jump limitation - prevent physiologically impossible jumps
-      let limitedHeartRate = result.heartRate;
-      
-      if (hrState.lastHeartRate > 0) {
-        // Calculate maximum allowed change
-        const maxChange = HR_CONSTANTS.MAX_JUMP;
-        
-        // Limit heart rate change
-        if (Math.abs(result.heartRate - hrState.lastHeartRate) > maxChange) {
-          // Move toward the new value, but limit the change
-          if (result.heartRate > hrState.lastHeartRate) {
-            limitedHeartRate = hrState.lastHeartRate + maxChange;
-          } else {
-            limitedHeartRate = hrState.lastHeartRate - maxChange;
-          }
-          
-          // Adjust confidence based on jump limitation
-          result.confidence *= 0.7; // Reduced confidence when jump limiting is applied
-        }
-      }
-      
-      // Store rate in history (after jump limiting)
-      hrState.heartRateHistory.unshift(limitedHeartRate);
-      hrState.confidenceScores.unshift(result.confidence);
-      hrState.timestamps.unshift(now);
-      
-      // Limit history size
-      if (hrState.heartRateHistory.length > 10) {
-        hrState.heartRateHistory.pop();
-        hrState.confidenceScores.pop();
-        hrState.timestamps.pop();
-      }
-      
-      // Store last raw heart rate (after jump limiting)
-      hrState.lastHeartRate = limitedHeartRate;
-      
-      // Apply aggressive smoothing for display
-      // Start with smoothed value or use limited rate if it's our first reading
-      if (hrState.smoothedHeartRate === 0) {
-        hrState.smoothedHeartRate = limitedHeartRate;
-      } else {
-        // Apply very strong smoothing to prevent jumps
-        // More weight (85%) to previous value, only 15% to new reading
-        hrState.smoothedHeartRate = Math.round(
-          0.85 * hrState.smoothedHeartRate + 0.15 * limitedHeartRate
-        );
-      }
-      
-      hrState.signalQuality = result.confidence;
-      
-      // Check if readings are stable
-      if (isStableReading(hrState.heartRateHistory)) {
-        hrState.stabilityCounter++;
-      } else {
-        hrState.stabilityCounter = Math.max(0, hrState.stabilityCounter - 1);
-      }
-      
-      return {
-        heartRate: hrState.smoothedHeartRate,
-        zone: getCurrentZone(hrState.smoothedHeartRate),
-        quality: result.confidence,
-        trend: calculateTrend(hrState.heartRateHistory),
-        fingerDetected: true,
-        isStable: hrState.stabilityCounter > 2
-      };
-    }
-    
-    // Fallback to last known heart rate if calculation failed but signal is good
-    if (hrState.smoothedHeartRate > 0 && signalQuality > 0.5) {
-      return {
-        heartRate: hrState.smoothedHeartRate,
-        zone: getCurrentZone(hrState.smoothedHeartRate),
-        quality: signalQuality * 0.7, // Reduced confidence as this is a carried-over value
-        trend: calculateTrend(hrState.heartRateHistory),
-        fingerDetected: true
-      };
-    }
-    
-    // Default return if no valid heart rate detected
-    return {
-      heartRate: 0,
-      zone: "Rest",
-      quality: signalQuality,
-      trend: "stable",
-      fingerDetected: true
-    };
+  // STRICT finger detection based exactly on IR values being above 18000
+  const fingerDetected = max > 18000;
+  
+  if (!fingerDetected) {
+    isAcquiring = false;
+    batchesReceived = 0;
+    return createResponse(0, false, "No signal", "Place finger on sensor");
   }
   
-  // Calculate heart rate from PPG signal with improved peak detection
-  function calculateHeartRate(ppgBuffer) {
-    // 1. Pre-process signal
-    const preprocessed = preprocessSignal(ppgBuffer);
-    
-    // 2. Detect peaks in processed signal
-    const peakResult = detectPeaks(preprocessed);
-    const peaks = peakResult.peaks;
-    const peakQuality = peakResult.quality;
-    
-    // Need enough peaks for reliable heart rate calculation
-    if (peaks.length < HR_CONSTANTS.MIN_PEAKS) {
-      return { heartRate: 0, confidence: 0 };
-    }
-    
-    // 3. Calculate intervals between peaks
+  // Start acquisition process if not already acquiring
+  if (!isAcquiring) {
+    isAcquiring = true;
+    acquisitionStartTime = currentTime;
+    isStable = false;
+    batchesReceived = 0;
+  }
+  
+  // Increment batch counter when finger is detected
+  batchesReceived++;
+  
+  // Calculate heart rate directly from the 500 samples
+  
+  // STEP 1: Basic signal filtering on the current batch
+  const filteredSignal = filterSignal(ppgData);
+  
+  // STEP 2: Detect peaks in the filtered signal
+  const peaks = detectPeaks(filteredSignal);
+  
+  // STEP 3: Calculate heart rate directly from peaks in this batch
+  let heartRate = 0;
+  
+  if (peaks.length >= 2) {
+    // METHOD 1: Calculate from intervals between peaks
     const intervals = [];
     for (let i = 1; i < peaks.length; i++) {
-      intervals.push((peaks[i] - peaks[i-1]) / HR_CONSTANTS.SAMPLE_RATE);
+      intervals.push(peaks[i] - peaks[i-1]);
     }
     
-    // 4. Filter out physiologically impossible intervals
-    const validIntervals = intervals.filter(interval => 
-      interval >= 60 / HR_CONSTANTS.MAX_HR && 
-      interval <= 60 / HR_CONSTANTS.MIN_HR
-    );
+    // Filter out physiologically impossible intervals
+    const validIntervals = intervals.filter(interval => {
+      // Assuming 150Hz sample rate:
+      // 30 BPM = 150 * 60/30 = 300 samples between peaks
+      // 240 BPM = 150 * 60/240 = 37.5 samples between peaks
+      return interval >= 37 && interval <= 300;
+    });
     
-    if (validIntervals.length < 2) {
-      return { heartRate: 0, confidence: 0 };
+    if (validIntervals.length > 0) {
+      // Calculate average interval
+      const avgInterval = validIntervals.reduce((sum, val) => sum + val, 0) / validIntervals.length;
+      
+      // Convert to heart rate (BPM) assuming 150Hz sample rate
+      // BPM = 60 * sample_rate / samples_per_beat
+      heartRate = Math.round(60 * 150 / avgInterval);
+      
+      // Validate result is physiologically plausible
+      if (heartRate < 40 || heartRate > 200) {
+        heartRate = 0;
+      }
     }
     
-    // 5. Advanced outlier rejection
-    // First sort intervals
-    validIntervals.sort((a, b) => a - b);
-    
-    // Calculate median and median absolute deviation (MAD) - robust to outliers
-    const medianIndex = Math.floor(validIntervals.length / 2);
-    const medianInterval = validIntervals[medianIndex];
-    
-    // Calculate MAD
-    const absoluteDeviations = validIntervals.map(interval => Math.abs(interval - medianInterval));
-    absoluteDeviations.sort((a, b) => a - b);
-    const mad = absoluteDeviations[Math.floor(absoluteDeviations.length / 2)];
-    
-    // Filter intervals using MAD (more robust than standard deviation)
-    const filteredIntervals = validIntervals.filter(interval => 
-      Math.abs(interval - medianInterval) <= 2.5 * mad
-    );
-    
-    if (filteredIntervals.length < 2) {
-      return { heartRate: 0, confidence: 0 };
+    // METHOD 2: If method 1 failed, try direct peak counting
+    if (heartRate === 0 && peaks.length >= 3) {
+      // Calculate rate from number of peaks and time span
+      // Using first and last peak to determine time span in samples
+      const sampleSpan = peaks[peaks.length - 1] - peaks[0];
+      // Convert to seconds assuming 150Hz
+      const timeSpanSeconds = sampleSpan / 150;
+      // Number of beats is (peaks - 1)
+      const beatCount = peaks.length - 1;
+      // BPM = beats * 60 / time_span_seconds
+      heartRate = Math.round(beatCount * 60 / timeSpanSeconds);
+      
+      // Validate result
+      if (heartRate < 40 || heartRate > 200) {
+        heartRate = 0;
+      }
     }
     
-    // 6. Calculate final heart rate using median of filtered intervals
-    const finalMedianIndex = Math.floor(filteredIntervals.length / 2);
-    const finalMedianInterval = filteredIntervals[finalMedianIndex];
-    const heartRate = Math.round(60 / finalMedianInterval);
-    
-    // 7. Calculate confidence score
-    const confidence = calculateConfidence(filteredIntervals, peakQuality);
-    
-    return { heartRate, confidence };
+    // METHOD 3: If the above methods failed, try from total data duration
+    if (heartRate === 0 && peaks.length >= 2) {
+      // Calculate from total sample duration
+      // 500 samples at 150Hz = 3.33 seconds
+      const durationSeconds = ppgData.length / 150;
+      // BPM = beats * 60 / duration
+      heartRate = Math.round((peaks.length - 1) * 60 / durationSeconds);
+      
+      // Validate result
+      if (heartRate < 40 || heartRate > 200) {
+        heartRate = 0;
+      }
+    }
   }
   
-  // Preprocess PPG signal with enhanced filtering
-  function preprocessSignal(ppgBuffer) {
-    // 1. Normalize signal (remove DC component)
-    const mean = ppgBuffer.reduce((sum, val) => sum + val, 0) / ppgBuffer.length;
-    const normalized = ppgBuffer.map(val => val - mean);
-    
-    // 2. Apply stronger bandpass filter (0.7Hz - 3.5Hz, typical heart rate frequencies)
-    // Stronger filtering to reject noise
-    const filtered = [];
-    filtered[0] = normalized[0];
-    filtered[1] = normalized[1];
-    
-    // Coefficients for bandpass ~0.7-3.5Hz at 150Hz (tighter than before)
-    const a1 = -1.82;
-    const a2 = 0.85;
-    const b0 = 0.02;
-    const b2 = -0.02;
-    
-    for (let i = 2; i < normalized.length; i++) {
-      filtered[i] = b0 * normalized[i] + b2 * normalized[i-2] - a1 * filtered[i-1] - a2 * filtered[i-2];
+  // If we got a valid heart rate, add it to history
+  if (heartRate > 0) {
+    recentHeartRates.unshift(heartRate);
+    if (recentHeartRates.length > MAX_HISTORY) {
+      recentHeartRates.pop();
     }
-    
-    // 3. Apply derivative filter to emphasize slopes
-    const derivative = new Array(filtered.length).fill(0);
-    for (let i = 2; i < filtered.length - 2; i++) {
-      derivative[i] = (filtered[i+1] - filtered[i-1]) / 2;
-    }
-    
-    // 4. Square the signal to emphasize peaks and make all values positive
-    const squared = derivative.map(val => val * val);
-    
-    // 5. Apply moving average integration with wider window for stability
-    const windowSize = Math.round(HR_CONSTANTS.SAMPLE_RATE * 0.15); // ~150ms window (wider)
-    const integrated = new Array(squared.length).fill(0);
-    
-    // Optimized moving average calculation
-    let sum = 0;
-    for (let i = 0; i < windowSize && i < squared.length; i++) {
-      sum += squared[i];
-      integrated[i] = sum / (i + 1);
-    }
-    
-    for (let i = windowSize; i < squared.length; i++) {
-      sum = sum - squared[i - windowSize] + squared[i];
-      integrated[i] = sum / windowSize;
-    }
-    
-    return integrated;
   }
   
-  // Enhanced peak detection focusing on consistency
-  function detectPeaks(processedSignal) {
-    // Find max value for adaptive thresholding
-    let maxValue = 0;
-    for (let i = 0; i < processedSignal.length; i++) {
-      if (processedSignal[i] > maxValue) maxValue = processedSignal[i];
-    }
+  // Check if the last 3-4 heart rates are within ±15 BPM
+  let finalHeartRate = heartRate;
+  
+  if (recentHeartRates.length >= 3) {
+    let inRange = true;
     
-    // Adaptive thresholds - primary and secondary
-    const threshold1 = maxValue * 0.35;
-    const threshold2 = maxValue * 0.15;
-    
-    // Parameters for peak detection
-    const lookAhead = Math.floor(HR_CONSTANTS.SAMPLE_RATE * 0.05); // 50ms
-    const minPeakDistance = Math.floor(HR_CONSTANTS.SAMPLE_RATE * 0.3); // 300ms (200bpm)
-    
-    // Find peaks
-    const peaks = [];
-    let lastPeakIndex = -minPeakDistance;
-    
-    for (let i = lookAhead; i < processedSignal.length - lookAhead; i++) {
-      // Check if this is a local maximum
-      let isPeak = true;
-      for (let j = 1; j <= lookAhead; j++) {
-        if (processedSignal[i] <= processedSignal[i-j] || 
-            processedSignal[i] <= processedSignal[i+j]) {
-          isPeak = false;
+    // Check if all values are within ±15 BPM of each other
+    for (let i = 0; i < Math.min(4, recentHeartRates.length); i++) {
+      for (let j = i + 1; j < Math.min(4, recentHeartRates.length); j++) {
+        if (Math.abs(recentHeartRates[i] - recentHeartRates[j]) > 15) {
+          inRange = false;
           break;
         }
       }
+      if (!inRange) break;
+    }
+    
+    if (!inRange) {
+      // If not in range, take the mean of the last 3-4 values
+      const valuesToAverage = recentHeartRates.slice(0, Math.min(4, recentHeartRates.length));
+      finalHeartRate = Math.round(valuesToAverage.reduce((sum, val) => sum + val, 0) / valuesToAverage.length);
+    } else {
+      // If they are in range, use the current reading
+      finalHeartRate = heartRate > 0 ? heartRate : recentHeartRates[0];
+    }
+  }
+  
+  // Check if reading is stable (all recent readings within ±15 BPM)
+  isStable = recentHeartRates.length >= 3;
+  
+  if (isStable) {
+    // Check max difference between any two readings
+    for (let i = 0; i < Math.min(4, recentHeartRates.length); i++) {
+      for (let j = i + 1; j < Math.min(4, recentHeartRates.length); j++) {
+        if (Math.abs(recentHeartRates[i] - recentHeartRates[j]) > 15) {
+          isStable = false;
+          break;
+        }
+      }
+      if (!isStable) break;
+    }
+  }
+  
+  // Determine heart rate zone
+  let zone = HR_ZONES[0]; // Default to Rest
+  if (finalHeartRate > 0) {
+    for (let i = 0; i < HR_ZONES.length; i++) {
+      if (finalHeartRate <= HR_ZONES[i].upperLimit) {
+        zone = HR_ZONES[i];
+        break;
+      }
+    }
+  }
+  
+  // Determine display text and details
+  let displayText = "No signal";
+  let detailText = "Acquiring...";
+  const acquisitionTime = currentTime - acquisitionStartTime;
+  const acquisitionSecondsElapsed = Math.floor(acquisitionTime / 1000);
+  
+  // NEW CHANGE: Check for minimum acquisition time/batches before showing heart rate
+  const inAcquisitionPhase = batchesReceived < MIN_BATCHES_FOR_DISPLAY;
+  
+  if (finalHeartRate > 0) {
+    if (inAcquisitionPhase) {
+      // Show acquisition message for the first 4-5 batches
+      displayText = "Acquiring signal";
+      detailText = `Please wait... (${acquisitionSecondsElapsed}s)`;
+    } else if (isStable) {
+      // Stable heart rate after acquisition period
+      displayText = `${finalHeartRate}`;
+      detailText = zone.name;
+    } else {
+      // Have heart rate but not yet stable
+      displayText = `${finalHeartRate}`;
+      detailText = "Stabilizing...";
+    }
+  } else {
+    // No valid heart rate yet
+    if (acquisitionTime < 2000) {
+      displayText = "Detecting pulse";
+      detailText = "Please wait...";
+    } else {
+      displayText = "Acquiring signal";
+      detailText = `Keep finger still (${acquisitionSecondsElapsed}s)`;
+    }
+  }
+  
+  // Create response object
+  return createResponse(
+    inAcquisitionPhase ? 0 : finalHeartRate, // Don't send heart rate during acquisition phase
+    fingerDetected,
+    displayText,
+    detailText,
+    zone.name,
+    zone.colorCode,
+    "stable", // No trend calculation needed
+    {
+      signalMax: max,
+      peakCount: peaks.length,
+      batchSize: ppgData.length,
+      calculatedRate: heartRate,
+      finalRate: finalHeartRate,
+      recentRates: recentHeartRates.slice(0, 4),
+      stable: isStable,
+      batchesReceived: batchesReceived,
+      inAcquisitionPhase: inAcquisitionPhase
+    }
+  );
+}
+
+// Filter signal to remove noise and emphasize heart beats
+function filterSignal(ppgData) {
+  // STEP 1: Normalize the signal (remove DC component)
+  const mean = ppgData.reduce((sum, val) => sum + val, 0) / ppgData.length;
+  const normalized = ppgData.map(val => val - mean);
+  
+  // STEP 2: Apply simple moving average to smooth the signal
+  const windowSize = 5;
+  const smoothed = [];
+  
+  for (let i = 0; i < normalized.length; i++) {
+    let sum = 0;
+    let count = 0;
+    
+    for (let j = Math.max(0, i - windowSize); j <= Math.min(normalized.length - 1, i + windowSize); j++) {
+      sum += normalized[j];
+      count++;
+    }
+    
+    smoothed.push(sum / count);
+  }
+  
+  // STEP 3: Apply basic derivative to emphasize slopes
+  const derivative = [];
+  for (let i = 1; i < smoothed.length; i++) {
+    derivative.push(smoothed[i] - smoothed[i-1]);
+  }
+  derivative.unshift(0); // Add a zero at the beginning to maintain array length
+  
+  // STEP 4: Square the signal to amplify peaks and make everything positive
+  const squared = derivative.map(val => val * val);
+  
+  // STEP 5: Another round of smoothing to clean up the signal
+  const result = [];
+  const finalWindowSize = 8;
+  
+  for (let i = 0; i < squared.length; i++) {
+    let sum = 0;
+    let count = 0;
+    
+    for (let j = Math.max(0, i - finalWindowSize); j <= Math.min(squared.length - 1, i + finalWindowSize); j++) {
+      sum += squared[j];
+      count++;
+    }
+    
+    result.push(sum / count);
+  }
+  
+  return result;
+}
+
+// Detect peaks in the filtered signal
+function detectPeaks(filteredSignal) {
+  const peaks = [];
+  
+  // Calculate an adaptive threshold
+  const sortedSignal = [...filteredSignal].sort((a, b) => b - a);
+  // Use the top 25% percentile as a base for threshold
+  const thresholdBase = sortedSignal[Math.floor(sortedSignal.length * 0.25)];
+  const threshold = thresholdBase * 0.5; // 50% of the top 25% value
+  
+  // Minimum distance between peaks (in samples) - assuming 150Hz sample rate
+  // This corresponds to 240 BPM max (60 * 150 / 240 = 37.5 samples)
+  const minPeakDistance = 38;
+  
+  // Find peaks
+  let lastPeakIndex = -minPeakDistance;
+  
+  for (let i = 2; i < filteredSignal.length - 2; i++) {
+    // Check if this point is a local maximum
+    if (filteredSignal[i] > filteredSignal[i-1] &&
+        filteredSignal[i] > filteredSignal[i-2] &&
+        filteredSignal[i] > filteredSignal[i+1] &&
+        filteredSignal[i] > filteredSignal[i+2] &&
+        filteredSignal[i] > threshold &&
+        (i - lastPeakIndex) >= minPeakDistance) {
       
-      // Add peak if it meets all criteria
-      if (isPeak && processedSignal[i] > threshold1 && 
+      peaks.push(i);
+      lastPeakIndex = i;
+    }
+  }
+  
+  // If we found too few peaks, try with a lower threshold
+  if (peaks.length < 2 && thresholdBase > 0) {
+    const lowerThreshold = thresholdBase * 0.2; // 20% of the top 25% value
+    
+    for (let i = 2; i < filteredSignal.length - 2; i++) {
+      // Skip if we already identified this as a peak
+      if (peaks.includes(i)) continue;
+      
+      // Check with lower threshold
+      if (filteredSignal[i] > filteredSignal[i-1] &&
+          filteredSignal[i] > filteredSignal[i-2] &&
+          filteredSignal[i] > filteredSignal[i+1] &&
+          filteredSignal[i] > filteredSignal[i+2] &&
+          filteredSignal[i] > lowerThreshold &&
           (i - lastPeakIndex) >= minPeakDistance) {
+        
         peaks.push(i);
         lastPeakIndex = i;
       }
     }
     
-    // Calculate signal quality based on noise ratio
-    let noiseCount = 0;
-    const totalPoints = processedSignal.length - 2 * lookAhead;
-    
-    for (let i = lookAhead; i < processedSignal.length - lookAhead; i++) {
-      if (processedSignal[i] > threshold2 && processedSignal[i] <= threshold1) {
-        noiseCount++;
-      }
-    }
-    
-    const noiseRatio = noiseCount / totalPoints;
-    let signalQuality = 1.0;
-    
-    if (noiseRatio > 0.4) signalQuality = 0.1;
-    else if (noiseRatio > 0.3) signalQuality = 0.3;
-    else if (noiseRatio > 0.2) signalQuality = 0.6;
-    else if (noiseRatio > 0.1) signalQuality = 0.8;
-    
-    return { peaks, quality: signalQuality };
+    // Sort peaks by index
+    peaks.sort((a, b) => a - b);
   }
   
-  // Rest of the functions remain the same as in the previous code
-  // calculateConfidence, applyTemporalSmoothing, isStableReading, calculateTrend, assessSignalQuality, getCurrentZone
+  return peaks;
+}
+
+// Create a standardized response object
+function createResponse(heartRate, fingerDetected, displayValue, displayDetails, zoneName = "Rest", zoneColor = "#3498db", trend = "stable", debug = {}) {
+  return {
+    heartRate: heartRate,
+    fingerDetected: fingerDetected,
+    display_value: displayValue,
+    display_details: displayDetails,
+    zone: zoneName,
+    zoneColor: zoneColor,
+    quality: fingerDetected ? 0.8 : 0,  // Simple quality metric
+    confidence: fingerDetected ? 0.8 : 0, // Simple confidence metric
+    trend: trend,
+    phase: fingerDetected ? (batchesReceived < MIN_BATCHES_FOR_DISPLAY ? "acquiring" : (isStable ? "tracking" : "stabilizing")) : "no_signal",
+    debug: debug
+  };
+}
+
+// Export the function for use in the server
+module.exports = { processHeartRate };
