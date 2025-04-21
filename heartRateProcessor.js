@@ -1,13 +1,27 @@
-// Final Heart Rate Calculator
-// Processes each batch of 500 samples with extended acquisition period
+// Final Heart Rate Calculator with Complete Protection
+// Maintains all previous rules while preventing unrealistic readings
 
 // Keep track of the last 4 shown heart rates for stability checking
 const recentHeartRates = [];
 const MAX_HISTORY = 4; // Keep last 4 heart rate readings for stability
 
+// Buffer to hold 1000 samples (two batches)
+let sampleBuffer = [];
+const MAX_BUFFER_SIZE = 1000;
+
 // Track number of batches received for extended acquisition
 let batchesReceived = 0;
 const MIN_BATCHES_FOR_DISPLAY = 5; // Require at least 5 batches before showing heart rate
+
+// Track finger detection state
+let fingerDetectedState = false;
+let lastDisplayedValue = "No signal";
+let lastDisplayedHeartRate = 0;
+let consecutiveLowSignalBatches = 0;
+
+// Track high zone readings
+let consecutiveHighZoneReadings = 0;
+const MIN_HIGH_ZONE_STREAK = 5; // Require 5 consecutive high readings to confirm (increased from 3)
 
 // Heart rate zones
 const HR_ZONES = [
@@ -19,19 +33,37 @@ const HR_ZONES = [
   { name: "Maximum", color: "#9b59b6", upperLimit: 240, colorCode: "#9b59b6" }
 ];
 
+// Define thresholds for what qualifies as "high heart rate"
+const VIGOROUS_THRESHOLD = 130; // Readings above this are considered "high"
+
 // Track acquisition state
 let isAcquiring = false;
 let acquisitionStartTime = 0;
 let isStable = false;
 
-// Main heart rate processing function - processes only the current 500 samples
+// Track first display time for initial period bias
+let firstDisplayTime = 0;
+const INITIAL_PERIOD_DURATION = 30000; // 30 seconds of extra caution for high readings
+
+// Reset all state variables
+function resetState() {
+  isAcquiring = false;
+  batchesReceived = 0;
+  sampleBuffer = [];
+  consecutiveLowSignalBatches = 0;
+  fingerDetectedState = false;
+  isStable = false;
+  consecutiveHighZoneReadings = 0;
+  firstDisplayTime = 0;
+  lastDisplayedHeartRate = 0;
+}
+
+// Main heart rate processing function
 function processHeartRate(ppgData) {
   const currentTime = Date.now();
   
   // Check if we have enough data
   if (!ppgData || ppgData.length < 100) {
-    isAcquiring = false;
-    batchesReceived = 0;
     return createResponse(0, false, "No signal", "Place finger on sensor");
   }
 
@@ -39,96 +71,167 @@ function processHeartRate(ppgData) {
   const min = Math.min(...ppgData);
   const max = Math.max(...ppgData);
   
-  // STRICT finger detection based exactly on IR values being above 18000
-  const fingerDetected = max > 18000;
+  // FINGER DETECTION:
+  // Count how many samples are below the threshold
+  const belowThresholdCount = ppgData.filter(val => val <= 18000).length;
+  const percentBelowThreshold = (belowThresholdCount / ppgData.length) * 100;
   
-  if (!fingerDetected) {
-    isAcquiring = false;
-    batchesReceived = 0;
+  // Only consider finger removed if 70% or more of samples are below threshold
+  const currentBatchHasFinger = percentBelowThreshold < 70;
+  
+  // Track consecutive batches with low signal
+  if (!currentBatchHasFinger) {
+    consecutiveLowSignalBatches++;
+  } else {
+    consecutiveLowSignalBatches = 0;
+  }
+  
+  // FINGER STATE LOGIC:
+  // 1. If current batch has finger, set state to true
+  // 2. Only set state to false if we've had multiple consecutive batches with low signal
+  if (currentBatchHasFinger) {
+    fingerDetectedState = true;
+  } else if (consecutiveLowSignalBatches >= 2) {
+    // Only reset after 2 consecutive batches with low signal
+    fingerDetectedState = false;
+  }
+  
+  // Handle acquisition state based on finger detection
+  if (fingerDetectedState) {
+    // Start acquisition process if not already acquiring
+    if (!isAcquiring) {
+      isAcquiring = true;
+      acquisitionStartTime = currentTime;
+      isStable = false;
+      batchesReceived = 0;
+      sampleBuffer = []; // Clear buffer
+      consecutiveHighZoneReadings = 0; // Reset high zone streak counter
+      firstDisplayTime = 0; // Reset first display time
+    }
+    
+    // Only increment batch counter and add to buffer if current batch has good signal
+    if (currentBatchHasFinger) {
+      batchesReceived++;
+      
+      // Add current batch to sample buffer
+      sampleBuffer = sampleBuffer.concat(ppgData);
+      
+      // Keep buffer at maximum size (1000 samples)
+      if (sampleBuffer.length > MAX_BUFFER_SIZE) {
+        sampleBuffer = sampleBuffer.slice(-MAX_BUFFER_SIZE);
+      }
+    }
+  } else {
+    // Finger definitely removed - reset state
+    resetState();
     return createResponse(0, false, "No signal", "Place finger on sensor");
   }
   
-  // Start acquisition process if not already acquiring
-  if (!isAcquiring) {
-    isAcquiring = true;
-    acquisitionStartTime = currentTime;
-    isStable = false;
-    batchesReceived = 0;
+  // Wait until we have at least 750 samples for calculation (should happen by batch 2)
+  let heartRate = 0;
+  let peaks = [];
+  
+  if (sampleBuffer.length >= 750) {
+    // STEP 1: Basic signal filtering on the 1000-sample window
+    const filteredSignal = filterSignal(sampleBuffer);
+    
+    // STEP 2: Detect peaks in the filtered signal
+    peaks = detectPeaks(filteredSignal);
+    
+    // STEP 3: Calculate heart rate directly from peaks in the 1000-sample window
+    if (peaks.length >= 3) { // Need at least 3 peaks for reliable calculation
+      // METHOD 1: Calculate from intervals between peaks
+      const intervals = [];
+      for (let i = 1; i < peaks.length; i++) {
+        intervals.push(peaks[i] - peaks[i-1]);
+      }
+      
+      // Filter out physiologically impossible intervals
+      const validIntervals = intervals.filter(interval => {
+        // Assuming 150Hz sample rate:
+        // 30 BPM = 150 * 60/30 = 300 samples between peaks
+        // 240 BPM = 150 * 60/240 = 37.5 samples between peaks
+        return interval >= 37 && interval <= 300;
+      });
+      
+      if (validIntervals.length > 0) {
+        // Calculate average interval
+        const avgInterval = validIntervals.reduce((sum, val) => sum + val, 0) / validIntervals.length;
+        
+        // Convert to heart rate (BPM) assuming 150Hz sample rate
+        // BPM = 60 * sample_rate / samples_per_beat
+        heartRate = Math.round(60 * 150 / avgInterval);
+        
+        // Validate result is physiologically plausible
+        if (heartRate < 40 || heartRate > 200) {
+          heartRate = 0;
+        }
+      }
+      
+      // METHOD 2: If method 1 failed, try direct peak counting
+      if (heartRate === 0 && peaks.length >= 4) {
+        // Calculate rate from number of peaks and time span
+        // Using first and last peak to determine time span in samples
+        const sampleSpan = peaks[peaks.length - 1] - peaks[0];
+        // Convert to seconds assuming 150Hz
+        const timeSpanSeconds = sampleSpan / 150;
+        // Number of beats is (peaks - 1)
+        const beatCount = peaks.length - 1;
+        // BPM = beats * 60 / time_span_seconds
+        heartRate = Math.round(beatCount * 60 / timeSpanSeconds);
+        
+        // Validate result
+        if (heartRate < 40 || heartRate > 200) {
+          heartRate = 0;
+        }
+      }
+      
+      // METHOD 3: If the above methods failed, try from total data duration
+      if (heartRate === 0 && peaks.length >= 3) {
+        // Calculate from total sample duration
+        // 1000 samples at 150Hz = 6.67 seconds
+        const durationSeconds = sampleBuffer.length / 150;
+        // BPM = beats * 60 / duration
+        heartRate = Math.round((peaks.length - 1) * 60 / durationSeconds);
+        
+        // Validate result
+        if (heartRate < 40 || heartRate > 200) {
+          heartRate = 0;
+        }
+      }
+    }
   }
   
-  // Increment batch counter when finger is detected
-  batchesReceived++;
-  
-  // Calculate heart rate directly from the 500 samples
-  
-  // STEP 1: Basic signal filtering on the current batch
-  const filteredSignal = filterSignal(ppgData);
-  
-  // STEP 2: Detect peaks in the filtered signal
-  const peaks = detectPeaks(filteredSignal);
-  
-  // STEP 3: Calculate heart rate directly from peaks in this batch
-  let heartRate = 0;
-  
-  if (peaks.length >= 2) {
-    // METHOD 1: Calculate from intervals between peaks
-    const intervals = [];
-    for (let i = 1; i < peaks.length; i++) {
-      intervals.push(peaks[i] - peaks[i-1]);
-    }
-    
-    // Filter out physiologically impossible intervals
-    const validIntervals = intervals.filter(interval => {
-      // Assuming 150Hz sample rate:
-      // 30 BPM = 150 * 60/30 = 300 samples between peaks
-      // 240 BPM = 150 * 60/240 = 37.5 samples between peaks
-      return interval >= 37 && interval <= 300;
-    });
-    
-    if (validIntervals.length > 0) {
-      // Calculate average interval
-      const avgInterval = validIntervals.reduce((sum, val) => sum + val, 0) / validIntervals.length;
+  // Apply initial correction to reduce unrealistically high readings
+  // First 10 batches after acquisition have a corrective factor applied
+  if (heartRate > 0) {
+    // Initial reading correction - stronger for higher heart rates
+    if (batchesReceived <= MIN_BATCHES_FOR_DISPLAY + 5) {
+      // Apply a more aggressive correction factor for initial readings
+      let correctionFactor = 0;
       
-      // Convert to heart rate (BPM) assuming 150Hz sample rate
-      // BPM = 60 * sample_rate / samples_per_beat
-      heartRate = Math.round(60 * 150 / avgInterval);
-      
-      // Validate result is physiologically plausible
-      if (heartRate < 40 || heartRate > 200) {
-        heartRate = 0;
+      // Higher correction for higher heart rates
+      if (heartRate >= VIGOROUS_THRESHOLD) {
+        // Apply up to 15% reduction for high initial readings
+        correctionFactor = Math.max(0, 1 - (batchesReceived / 10));
+        const correctionAmount = Math.round(heartRate * 0.15 * correctionFactor);
+        heartRate = heartRate - correctionAmount;
+      } else if (heartRate >= 110) {
+        // Apply up to 10% reduction for moderate initial readings
+        correctionFactor = Math.max(0, 1 - (batchesReceived / 10));
+        const correctionAmount = Math.round(heartRate * 0.10 * correctionFactor);
+        heartRate = heartRate - correctionAmount;
+      } else {
+        // Apply up to 5% reduction for low initial readings
+        correctionFactor = Math.max(0, 1 - (batchesReceived / 10));
+        const correctionAmount = Math.round(heartRate * 0.05 * correctionFactor);
+        heartRate = heartRate - correctionAmount;
       }
     }
     
-    // METHOD 2: If method 1 failed, try direct peak counting
-    if (heartRate === 0 && peaks.length >= 3) {
-      // Calculate rate from number of peaks and time span
-      // Using first and last peak to determine time span in samples
-      const sampleSpan = peaks[peaks.length - 1] - peaks[0];
-      // Convert to seconds assuming 150Hz
-      const timeSpanSeconds = sampleSpan / 150;
-      // Number of beats is (peaks - 1)
-      const beatCount = peaks.length - 1;
-      // BPM = beats * 60 / time_span_seconds
-      heartRate = Math.round(beatCount * 60 / timeSpanSeconds);
-      
-      // Validate result
-      if (heartRate < 40 || heartRate > 200) {
-        heartRate = 0;
-      }
-    }
-    
-    // METHOD 3: If the above methods failed, try from total data duration
-    if (heartRate === 0 && peaks.length >= 2) {
-      // Calculate from total sample duration
-      // 500 samples at 150Hz = 3.33 seconds
-      const durationSeconds = ppgData.length / 150;
-      // BPM = beats * 60 / duration
-      heartRate = Math.round((peaks.length - 1) * 60 / durationSeconds);
-      
-      // Validate result
-      if (heartRate < 40 || heartRate > 200) {
-        heartRate = 0;
-      }
+    // Track first time we display a heart rate
+    if (firstDisplayTime === 0 && batchesReceived >= MIN_BATCHES_FOR_DISPLAY) {
+      firstDisplayTime = currentTime;
     }
   }
   
@@ -140,13 +243,23 @@ function processHeartRate(ppgData) {
     }
   }
   
+  // Track high heart rate readings
+  let highRateDetected = heartRate >= VIGOROUS_THRESHOLD;
+  
+  // Count consecutive high readings
+  if (highRateDetected) {
+    consecutiveHighZoneReadings++;
+  } else {
+    consecutiveHighZoneReadings = 0;
+  }
+  
   // Check if the last 3-4 heart rates are within ±15 BPM
   let finalHeartRate = heartRate;
   
   if (recentHeartRates.length >= 3) {
     let inRange = true;
     
-    // Check if all values are within ±15 BPM of each other
+    // Check if all values are within ±15 BPM of each other (MAINTAINING ORIGINAL RULE)
     for (let i = 0; i < Math.min(4, recentHeartRates.length); i++) {
       for (let j = i + 1; j < Math.min(4, recentHeartRates.length); j++) {
         if (Math.abs(recentHeartRates[i] - recentHeartRates[j]) > 15) {
@@ -158,16 +271,74 @@ function processHeartRate(ppgData) {
     }
     
     if (!inRange) {
-      // If not in range, take the mean of the last 3-4 values
-      const valuesToAverage = recentHeartRates.slice(0, Math.min(4, recentHeartRates.length));
-      finalHeartRate = Math.round(valuesToAverage.reduce((sum, val) => sum + val, 0) / valuesToAverage.length);
+      // Special handling for high readings during initial period
+      const isInInitialPeriod = firstDisplayTime > 0 && 
+                               (currentTime - firstDisplayTime) < INITIAL_PERIOD_DURATION;
+      
+      if (highRateDetected && 
+         (isInInitialPeriod || consecutiveHighZoneReadings < MIN_HIGH_ZONE_STREAK)) {
+        // During initial period or without confirmed streak, be very skeptical of high readings
+        
+        // Get median of recent readings (more robust than mean)
+        const sortedReadings = [...recentHeartRates].sort((a, b) => a - b);
+        const medianReading = sortedReadings[Math.floor(sortedReadings.length / 2)];
+        
+        // If the median is also high, use a weighted average
+        if (medianReading >= VIGOROUS_THRESHOLD) {
+          // Even the median is high, but still be cautious
+          const valuesToAverage = recentHeartRates.slice(0, Math.min(4, recentHeartRates.length));
+          finalHeartRate = Math.round(valuesToAverage.reduce((sum, val) => sum + val, 0) / valuesToAverage.length);
+        } else {
+          // The median is not high, strongly favor lower readings
+          finalHeartRate = Math.min(medianReading + 10, 
+                                    Math.round(medianReading * 0.7 + heartRate * 0.3));
+        }
+      } else {
+        // Regular case - take mean of all recent readings
+        const valuesToAverage = recentHeartRates.slice(0, Math.min(4, recentHeartRates.length));
+        finalHeartRate = Math.round(valuesToAverage.reduce((sum, val) => sum + val, 0) / valuesToAverage.length);
+      }
     } else {
-      // If they are in range, use the current reading
+      // If readings are in range, use the current reading
       finalHeartRate = heartRate > 0 ? heartRate : recentHeartRates[0];
     }
   }
   
-  // Check if reading is stable (all recent readings within ±15 BPM)
+  // SEVERE RESTRICTION: Override vigorous readings during first minute 
+  // unless there's overwhelming evidence
+  if (finalHeartRate >= VIGOROUS_THRESHOLD) {
+    const timeSinceFirstDisplay = firstDisplayTime > 0 ? currentTime - firstDisplayTime : 0;
+    
+    // In first 60 seconds, be extremely skeptical of vigorous readings
+    if (timeSinceFirstDisplay < 60000) {
+      // Need more consecutive confirmations early on
+      const requiredStreak = Math.max(MIN_HIGH_ZONE_STREAK, 
+                                    Math.round(5 + (60000 - timeSinceFirstDisplay) / 15000));
+      
+      if (consecutiveHighZoneReadings < requiredStreak) {
+        // Not enough confirmation - cap at moderate zone
+        finalHeartRate = Math.min(finalHeartRate, 125); // Cap just below vigorous
+        
+        // If there's a previous displayed heart rate, ensure smooth transition
+        if (lastDisplayedHeartRate > 0 && lastDisplayedHeartRate < finalHeartRate) {
+          // Limit increase to 5 BPM per reading in initial period
+          finalHeartRate = Math.min(finalHeartRate, lastDisplayedHeartRate + 5);
+        }
+      }
+    }
+    // Otherwise for first 3 minutes, still be cautious
+    else if (timeSinceFirstDisplay < 180000) {
+      if (consecutiveHighZoneReadings < MIN_HIGH_ZONE_STREAK) {
+        // Blended approach - allow some increase but still limit
+        if (lastDisplayedHeartRate > 0 && lastDisplayedHeartRate < finalHeartRate) {
+          // Allow up to 8 BPM increase per reading after first minute
+          finalHeartRate = Math.min(finalHeartRate, lastDisplayedHeartRate + 8);
+        }
+      }
+    }
+  }
+  
+  // Check if reading is stable (all recent readings within ±15 BPM) - MAINTAINING ORIGINAL RULE
   isStable = recentHeartRates.length >= 3;
   
   if (isStable) {
@@ -181,6 +352,11 @@ function processHeartRate(ppgData) {
       }
       if (!isStable) break;
     }
+  }
+  
+  // Save last displayed heart rate
+  if (finalHeartRate > 0 && batchesReceived >= MIN_BATCHES_FOR_DISPLAY) {
+    lastDisplayedHeartRate = finalHeartRate;
   }
   
   // Determine heart rate zone
@@ -200,12 +376,12 @@ function processHeartRate(ppgData) {
   const acquisitionTime = currentTime - acquisitionStartTime;
   const acquisitionSecondsElapsed = Math.floor(acquisitionTime / 1000);
   
-  // NEW CHANGE: Check for minimum acquisition time/batches before showing heart rate
+  // Check for minimum acquisition time/batches before showing heart rate
   const inAcquisitionPhase = batchesReceived < MIN_BATCHES_FOR_DISPLAY;
   
   if (finalHeartRate > 0) {
     if (inAcquisitionPhase) {
-      // Show acquisition message for the first 4-5 batches
+      // Show acquisition message for the first 5 batches
       displayText = "Acquiring signal";
       detailText = `Please wait... (${acquisitionSecondsElapsed}s)`;
     } else if (isStable) {
@@ -228,10 +404,13 @@ function processHeartRate(ppgData) {
     }
   }
   
+  // Save last displayed value
+  lastDisplayedValue = displayText;
+  
   // Create response object
   return createResponse(
     inAcquisitionPhase ? 0 : finalHeartRate, // Don't send heart rate during acquisition phase
-    fingerDetected,
+    fingerDetectedState,
     displayText,
     detailText,
     zone.name,
@@ -239,14 +418,19 @@ function processHeartRate(ppgData) {
     "stable", // No trend calculation needed
     {
       signalMax: max,
-      peakCount: peaks.length,
-      batchSize: ppgData.length,
+      bufferSize: sampleBuffer.length,
+      peakCount: peaks ? peaks.length : 0,
       calculatedRate: heartRate,
       finalRate: finalHeartRate,
       recentRates: recentHeartRates.slice(0, 4),
       stable: isStable,
       batchesReceived: batchesReceived,
-      inAcquisitionPhase: inAcquisitionPhase
+      inAcquisitionPhase: inAcquisitionPhase,
+      percentBelowThreshold: percentBelowThreshold,
+      consecutiveLowSignalBatches: consecutiveLowSignalBatches,
+      isHighRate: finalHeartRate >= VIGOROUS_THRESHOLD,
+      consecutiveHighZoneReadings: consecutiveHighZoneReadings,
+      timeSinceFirstDisplay: firstDisplayTime > 0 ? currentTime - firstDisplayTime : 0
     }
   );
 }
@@ -334,7 +518,7 @@ function detectPeaks(filteredSignal) {
   }
   
   // If we found too few peaks, try with a lower threshold
-  if (peaks.length < 2 && thresholdBase > 0) {
+  if (peaks.length < 3 && thresholdBase > 0) {
     const lowerThreshold = thresholdBase * 0.2; // 20% of the top 25% value
     
     for (let i = 2; i < filteredSignal.length - 2; i++) {
